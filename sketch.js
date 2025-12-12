@@ -9,8 +9,8 @@ let fileInputEl, saveButtonEl;
 
 // Grid / size control
 const grid = 10;
-const maxDiameter = grid + 12;
-const minDiameter = 12;
+const maxDiameter = grid + 2;
+const minDiameter = 10;
 
 // Emoji assets (replace filenames to match your repo)
 let emojis = {};
