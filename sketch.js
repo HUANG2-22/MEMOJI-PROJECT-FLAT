@@ -1,6 +1,6 @@
 // sketch.js (Complete)
-// B: pick a colored emoji PNG by pixel color
-// Output size = input image size (draw emojis on top of the original image)
+// B: choose emoji PNG by color, with thresholded "flattening" and inside-out smoothing
+// Output size = input image size (emojis drawn on top of the original image)
 
 let uploadedImg = null;
 let processedCanvas = null;
@@ -8,9 +8,23 @@ let processedCanvas = null;
 let fileInputEl, saveButtonEl;
 
 // Grid / size control
-const grid = 16;
-const maxDiameter = grid + 2;
-const minDiameter = 10;
+const grid = 10;
+const maxDiameter = grid + 12;
+const minDiameter = 12;
+
+// ---- Flatten controls (tune these) ----
+const SAMPLE_STEP = 2;             // 1 = best quality (slower), 2~3 faster
+const BASE_RADIUS = 4;             // neighborhood radius (pixels)
+const EXTRA_RADIUS_CENTER = 14;    // extra radius near center (inside-out flatten strength)
+
+// Color thresholds
+const SAT_GRAY_EDGE = 0.18;        // grayscale cutoff near edges
+const SAT_GRAY_CENTER = 0.38;      // grayscale cutoff near center (bigger = flatter center)
+const V_BLACK = 0.18;
+const V_WHITE = 0.90;
+
+// Hue bin borders (wide bins = flatter)
+const HUE_BORDERS = [30, 90, 150, 210, 270, 330]; // red|yellow|green|cyan|blue|purple|red
 
 // Emoji assets (replace filenames to match your repo)
 let emojis = {};
@@ -78,8 +92,12 @@ function handleFileChange(event) {
 }
 
 // -------------------------
-// Color helpers (RGB -> HSV)
+// Math / color helpers
 // -------------------------
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
 function rgbToHsv(r, g, b) {
   r /= 255; g /= 255; b /= 255;
 
@@ -102,22 +120,62 @@ function rgbToHsv(r, g, b) {
   return { h, s, v };
 }
 
-function pickEmojiByColor(r, g, b) {
-  const { h, s, v } = rgbToHsv(r, g, b);
+// Average RGB from a neighborhood around (cx, cy)
+function sampleAverageRGB(pixels, w, h, cx, cy, radius, step) {
+  const x0 = clamp(cx - radius, 0, w - 1);
+  const x1 = clamp(cx + radius, 0, w - 1);
+  const y0 = clamp(cy - radius, 0, h - 1);
+  const y1 = clamp(cy + radius, 0, h - 1);
 
-  // low saturation = grayscale
-  if (s < 0.18) {
-    if (v < 0.20) return emojis.black;
-    if (v > 0.88) return emojis.white;
+  let rs = 0, gs = 0, bs = 0, count = 0;
+
+  for (let y = y0; y <= y1; y += step) {
+    for (let x = x0; x <= x1; x += step) {
+      const idx = (x + y * w) * 4;
+      rs += pixels[idx];
+      gs += pixels[idx + 1];
+      bs += pixels[idx + 2];
+      count++;
+    }
+  }
+
+  return {
+    r: rs / count,
+    g: gs / count,
+    b: bs / count
+  };
+}
+
+// Pick emoji with thresholds + inside-out flatten control
+function pickEmojiByColorFlatten(r, g, b, x, y, w, h) {
+  const hsv = rgbToHsv(r, g, b);
+  const hue = hsv.h;
+  const s = hsv.s;
+  const v = hsv.v;
+
+  // inside-out factor: 0 at center, 1 at farthest edge
+  const dx = x - w / 2;
+  const dy = y - h / 2;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const maxDist = Math.sqrt((w / 2) ** 2 + (h / 2) ** 2);
+  const t = maxDist === 0 ? 1 : clamp(dist / maxDist, 0, 1);
+
+  // center flatter => higher grayscale cutoff at center
+  const satGray = SAT_GRAY_CENTER + (SAT_GRAY_EDGE - SAT_GRAY_CENTER) * t;
+
+  // grayscale handling
+  if (s < satGray) {
+    if (v < V_BLACK) return emojis.black;
+    if (v > V_WHITE) return emojis.white;
     return emojis.gray;
   }
 
-  // hue bins
-  if (h < 30 || h >= 330) return emojis.red;
-  if (h < 90)  return emojis.yellow;
-  if (h < 150) return emojis.green;
-  if (h < 210) return emojis.cyan;
-  if (h < 270) return emojis.blue;
+  // hue bins (wide bins => flatter)
+  if (hue < HUE_BORDERS[0] || hue >= HUE_BORDERS[5]) return emojis.red;
+  if (hue < HUE_BORDERS[1]) return emojis.yellow;
+  if (hue < HUE_BORDERS[2]) return emojis.green;
+  if (hue < HUE_BORDERS[3]) return emojis.cyan;
+  if (hue < HUE_BORDERS[4]) return emojis.blue;
   return emojis.purple;
 }
 
@@ -150,15 +208,29 @@ function processImage() {
 
   for (let y = 0; y < tempCanvas.height; y += grid + 2) {
     for (let x = 0; x < tempCanvas.width; x += grid + 2) {
-      const index = (x + y * tempCanvas.width) * 4;
-      if (index + 3 >= tempCanvas.pixels.length) continue;
 
-      const r = tempCanvas.pixels[index];
-      const g = tempCanvas.pixels[index + 1];
-      const b = tempCanvas.pixels[index + 2];
+      // inside-out smoothing radius: bigger near center => flatter center
+      const dx = x - tempCanvas.width / 2;
+      const dy = y - tempCanvas.height / 2;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const maxDist = Math.sqrt((tempCanvas.width / 2) ** 2 + (tempCanvas.height / 2) ** 2);
+      const t = maxDist === 0 ? 1 : clamp(dist / maxDist, 0, 1);
 
-      // brightness drives density + size (keeps your original logic idea)
-      const brightnessVal = (r + g + b) / 3;
+      const radius = Math.floor(BASE_RADIUS + (1 - t) * EXTRA_RADIUS_CENTER);
+
+      // Sample average color around (x,y)
+      const c = sampleAverageRGB(
+        tempCanvas.pixels,
+        tempCanvas.width,
+        tempCanvas.height,
+        x,
+        y,
+        radius,
+        SAMPLE_STEP
+      );
+
+      // brightness drives density + size (using averaged color)
+      const brightnessVal = (c.r + c.g + c.b) / 3;
       const brightnessMap = map(brightnessVal, 0, 255, 0.0, 1.0);
 
       if (brightnessMap > skipThreshold) {
@@ -169,8 +241,12 @@ function processImage() {
       const reversedPix = 255 - brightnessVal;
       const currentDiameter = map(reversedPix, 0, 255, minDiameter, maxDiameter);
 
-      // NEW: choose emoji by pixel color
-      const emoji = pickEmojiByColor(r, g, b);
+      // NEW: choose emoji by thresholded color (flattened)
+      const emoji = pickEmojiByColorFlatten(
+        c.r, c.g, c.b,
+        x, y,
+        tempCanvas.width, tempCanvas.height
+      );
 
       finalCanvas.image(emoji, x, y, currentDiameter, currentDiameter);
     }
