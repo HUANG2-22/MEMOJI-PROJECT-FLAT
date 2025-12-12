@@ -1,177 +1,206 @@
-let emoji_0, emoji_64, emoji_128, emoji_192;
-let uploadedImg = null;    // 用于存储用户上传的图片对象
-let processedCanvas;       // 存储最终的马赛克结果 (PGraphic)
-const targetSize = 900;    // 目标处理尺寸 (900x900)
-const grid = 10;           // 网格间距
-const maxDiameter = grid + 12; // 最大的 emoji 尺寸 (12)
-const minDiameter = 12;        // 最小的 emoji 尺寸 (2)
+// sketch.js (Complete)
+// B: pick a colored emoji PNG by pixel color
+// Output size = input image size (draw emojis on top of the original image)
 
-// ---------------------------
-// 1. 预加载图像资源
-// ---------------------------
+let uploadedImg = null;
+let processedCanvas = null;
+
+let fileInputEl, saveButtonEl;
+
+// Grid / size control
+const grid = 10;
+const maxDiameter = grid + 12;
+const minDiameter = 12;
+
+// Emoji assets (replace filenames to match your repo)
+let emojis = {};
+
 function preload() {
-    emoji_0 = loadImage("0.png");
-    emoji_64 = loadImage("64.png");
-    emoji_128 = loadImage("128.png");
-    emoji_192 = loadImage("192.png");
+  // Replace these filenames with your actual PNG names
+  emojis.red    = loadImage("emoji_red.png");
+  emojis.yellow = loadImage("emoji_yellow.png");
+  emojis.green  = loadImage("emoji_green.png");
+  emojis.cyan   = loadImage("emoji_cyan.png");
+  emojis.blue   = loadImage("emoji_blue.png");
+  emojis.purple = loadImage("emoji_purple.png");
+  emojis.gray   = loadImage("emoji_gray.png");
+  emojis.black  = loadImage("emoji_black.png");
+  emojis.white  = loadImage("emoji_white.png");
 }
 
-// ---------------------------
-// 2. 设置界面 (Setup)
-// ---------------------------
 function setup() {
-    createCanvas(targetSize, targetSize + 200); 
-    background(255);
-    
-    // 【CSP 修复】: 使用标准 JS 处理文件输入
-    let fileInput = createInput('', 'file');
-    fileInput.attribute('accept', 'image/*');
-    fileInput.elt.onchange = handleFileChange;
-    fileInput.position(width / 2 - 150, 40); 
-    fileInput.style('width', '180px'); 
-    
-    // 创建保存按钮
-    let saveButton = createButton('点击保存处理后的图片');
-    saveButton.mousePressed(saveImage); 
-    saveButton.position(width / 2 + 50, 40);
-    
-    textAlign(CENTER, CENTER);
+  // initial canvas; will resize to image size after upload
+  createCanvas(600, 800);
+  background(255);
+
+  // CSP-safe file input
+  fileInputEl = createInput("", "file");
+  fileInputEl.attribute("accept", "image/*");
+  fileInputEl.elt.onchange = handleFileChange;
+
+  // save button
+  saveButtonEl = createButton("点击保存处理后的图片");
+  saveButtonEl.mousePressed(saveImage);
+
+  textAlign(CENTER, CENTER);
+  layoutUI();
 }
 
-// ---------------------------
-// 3. 处理上传的文件 (标准 JS 事件)
-// ---------------------------
+function layoutUI() {
+  fileInputEl.position(width / 2 - 150, 40);
+  fileInputEl.style("width", "180px");
+  saveButtonEl.position(width / 2 + 50, 40);
+}
+
 function handleFileChange(event) {
-    const file = event.target.files[0];
-    if (file && file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            uploadedImg = createImg(e.target.result, '');
-            uploadedImg.hide();
-            uploadedImg.elt.onload = () => {
-                console.log("图片加载成功，开始处理...");
-                processImage();
-            };
-        };
-        reader.readAsDataURL(file);
-    } else {
-        uploadedImg = null;
-        console.error('文件类型错误，请上传图片文件');
-    }
-}
-
-
-// ---------------------------
-// 4. 图片处理核心逻辑 (组合策略 + 原图背景)
-// ---------------------------
-function processImage() {
-    if (uploadedImg === null) return;
-    
-    // 获取真实的像素尺寸
-    const originalWidth = uploadedImg.elt.naturalWidth || uploadedImg.width;
-    const originalHeight = uploadedImg.elt.naturalHeight || uploadedImg.height;
-
-    // A. 临时画布：用于缩放和存储原始图片的像素数据 (900x900)
-    let tempCanvas = createGraphics(targetSize, targetSize);
-    tempCanvas.pixelDensity(1); 
-    
-    // B. 计算等比例缩放和居中裁剪
-    let w, h;
-    let ratio = originalWidth / originalHeight;
-
-    if (ratio > 1) { 
-        h = targetSize;
-        w = originalWidth * (targetSize / originalHeight);
-    } else { 
-        w = targetSize;
-        h = originalHeight * (targetSize / originalWidth);
-    }
-
-    // 绘制图片到 tempCanvas
-    tempCanvas.image(uploadedImg, (targetSize - w) / 2, (targetSize - h) / 2, w, h);
-    tempCanvas.loadPixels(); // 加载原图像素数据 (用于读取亮度)
-    
-    // C. 最终画布：用于绘制马赛克表情符号
-    let finalCanvas = createGraphics(targetSize, targetSize);
-    
-    // *** 核心修改：将缩放和裁剪后的原图作为背景 ***
-    finalCanvas.image(tempCanvas, 0, 0); 
-    
-    // --- 策略二：密度变化参数 ---
-    const skipThreshold = 0.5;
-    
-    // D. 遍历原图像素并绘制表情符号
-    for (let y = 0; y < tempCanvas.height; y += grid + 2) {
-        for (let x = 0; x < tempCanvas.width; x += grid + 2) {
-            
-            let index = (x + y * tempCanvas.width) * 4; 
-            
-            if (index + 3 < tempCanvas.pixels.length) {
-                let pix = tempCanvas.pixels[index]; // 读取原图的像素值 (0-255)
-                
-                // --- 策略二：密度变化 (抖动) ---
-                let brightnessMap = map(pix, 0, 255, 0.0, 1.0); 
-                
-                if (brightnessMap > skipThreshold) {
-                     let skipProbability = map(brightnessMap, skipThreshold, 1.0, 0.0, 0.8); 
-                     
-                     if (random(1) < skipProbability) {
-                         continue; // 跳过本次绘制
-                     }
-                }
-                
-                // --- 策略一：尺寸缩放 (半色调) ---
-                let reversedPix = 255 - pix;
-                let currentDiameter = map(reversedPix, 0, 255, minDiameter, maxDiameter);
-                
-                // --- 选择 Emoji 类型 ---
-                let emoji;
-                if (pix <= 64) {
-                    emoji = emoji_0;
-                } else if (pix <= 128) {
-                    emoji = emoji_64;
-                } else if (pix <= 192) {
-                    emoji = emoji_128;
-                } else {
-                    emoji = emoji_192;
-                }
-                
-                // 使用动态直径绘制在原图背景之上
-                finalCanvas.image(emoji, x, y, currentDiameter, currentDiameter);
-            }
-        }
-    }
-    
-    // E. 更新最终结果
-    processedCanvas = finalCanvas;
-    
-    // 清除 uploadedImg 元素
-    uploadedImg.remove();
+  const file = event.target.files[0];
+  if (!file || !file.type.startsWith("image/")) {
     uploadedImg = null;
+    console.error("文件类型错误，请上传图片文件");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    loadImage(
+      e.target.result,
+      (img) => {
+        uploadedImg = img;
+        processImage();
+      },
+      () => {
+        uploadedImg = null;
+        console.error("图片加载失败");
+      }
+    );
+  };
+  reader.readAsDataURL(file);
 }
 
+// -------------------------
+// Color helpers (RGB -> HSV)
+// -------------------------
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+
+  const maxV = Math.max(r, g, b);
+  const minV = Math.min(r, g, b);
+  const d = maxV - minV;
+
+  let h = 0;
+  if (d !== 0) {
+    if (maxV === r) h = ((g - b) / d) % 6;
+    else if (maxV === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+
+  const s = maxV === 0 ? 0 : d / maxV;
+  const v = maxV;
+  return { h, s, v };
+}
+
+function pickEmojiByColor(r, g, b) {
+  const { h, s, v } = rgbToHsv(r, g, b);
+
+  // low saturation = grayscale
+  if (s < 0.18) {
+    if (v < 0.20) return emojis.black;
+    if (v > 0.88) return emojis.white;
+    return emojis.gray;
+  }
+
+  // hue bins
+  if (h < 30 || h >= 330) return emojis.red;
+  if (h < 90)  return emojis.yellow;
+  if (h < 150) return emojis.green;
+  if (h < 210) return emojis.cyan;
+  if (h < 270) return emojis.blue;
+  return emojis.purple;
+}
+
+// ------------------------------------
+// Core processing: draw on original size
+// ------------------------------------
+function processImage() {
+  if (uploadedImg === null) return;
+
+  const originalWidth = uploadedImg.width;
+  const originalHeight = uploadedImg.height;
+
+  // Resize main canvas to match image + UI space
+  resizeCanvas(originalWidth, originalHeight + 200);
+  layoutUI();
+
+  // temp canvas = original pixels (same size)
+  const tempCanvas = createGraphics(originalWidth, originalHeight);
+  tempCanvas.pixelDensity(1);
+  tempCanvas.image(uploadedImg, 0, 0, originalWidth, originalHeight);
+  tempCanvas.loadPixels();
+
+  // final canvas = original image as background + emojis on top
+  const finalCanvas = createGraphics(originalWidth, originalHeight);
+  finalCanvas.pixelDensity(1);
+  finalCanvas.image(tempCanvas, 0, 0);
+
+  // density variation (optional)
+  const skipThreshold = 0.5;
+
+  for (let y = 0; y < tempCanvas.height; y += grid + 2) {
+    for (let x = 0; x < tempCanvas.width; x += grid + 2) {
+      const index = (x + y * tempCanvas.width) * 4;
+      if (index + 3 >= tempCanvas.pixels.length) continue;
+
+      const r = tempCanvas.pixels[index];
+      const g = tempCanvas.pixels[index + 1];
+      const b = tempCanvas.pixels[index + 2];
+
+      // brightness drives density + size (keeps your original logic idea)
+      const brightnessVal = (r + g + b) / 3;
+      const brightnessMap = map(brightnessVal, 0, 255, 0.0, 1.0);
+
+      if (brightnessMap > skipThreshold) {
+        const skipProbability = map(brightnessMap, skipThreshold, 1.0, 0.0, 0.8);
+        if (random(1) < skipProbability) continue;
+      }
+
+      const reversedPix = 255 - brightnessVal;
+      const currentDiameter = map(reversedPix, 0, 255, minDiameter, maxDiameter);
+
+      // NEW: choose emoji by pixel color
+      const emoji = pickEmojiByColor(r, g, b);
+
+      finalCanvas.image(emoji, x, y, currentDiameter, currentDiameter);
+    }
+  }
+
+  processedCanvas = finalCanvas;
+  uploadedImg = null;
+}
 
 // ---------------------------
-// 5. 渲染和显示 (Draw)
+// Render
 // ---------------------------
 function draw() {
-    background(255); 
-    fill(0);
-    textSize(20);
-    text('上传图片后，处理结果将在下方显示 (900x900)', width / 2, 120);
-    
-    if (processedCanvas) {
-        image(processedCanvas, (width - targetSize) / 2, 200); 
-    }
+  background(255);
+  fill(0);
+  textSize(20);
+  text("上传图片后，处理结果将在下方显示 (原尺寸)", width / 2, 120);
+
+  if (processedCanvas) {
+    image(processedCanvas, 0, 200);
+  }
 }
 
 // ---------------------------
-// 6. 保存功能
+// Save
 // ---------------------------
 function saveImage() {
-    if (processedCanvas) {
-        save(processedCanvas, 'emojified_image', 'png');
-    } else {
-        alert('请先上传图片并等待处理完成！');
-    }
+  if (processedCanvas) {
+    save(processedCanvas, "emojified_image", "png");
+  } else {
+    alert("请先上传图片并等待处理完成！");
+  }
 }
