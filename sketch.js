@@ -8,7 +8,7 @@ let processedCanvas = null;
 let fileInputEl, saveButtonEl;
 
 // Grid / size control
-const grid = 10;
+const grid = 16;
 const maxDiameter = grid + 2;
 const minDiameter = 10;
 
