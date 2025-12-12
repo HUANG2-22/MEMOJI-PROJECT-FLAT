@@ -1,36 +1,45 @@
 // sketch.js (Complete)
-// B: choose emoji PNG by color, with thresholded "flattening" and inside-out smoothing
-// Output size = input image size (emojis drawn on top of the original image)
+// Option 1: "Color-block segmentation" via K-means clustering in (R,G,B,X,Y) on a downsampled image.
+// Then draw emojis by REGION (cluster label), not by a single pixel.
+//
+// ✅ Output image size = input image size
+// ✅ Draw emojis on top of original image
+//
+// NOTE: Replace the emoji filenames in preload() to match your repo assets.
 
 let uploadedImg = null;
 let processedCanvas = null;
 
 let fileInputEl, saveButtonEl;
 
-// Grid / size control
+// Mosaic controls
 const grid = 10;
 const maxDiameter = grid + 12;
 const minDiameter = 12;
 
-// ---- Flatten controls (tune these) ----
-const SAMPLE_STEP = 2;             // 1 = best quality (slower), 2~3 faster
-const BASE_RADIUS = 4;             // neighborhood radius (pixels)
-const EXTRA_RADIUS_CENTER = 14;    // extra radius near center (inside-out flatten strength)
+// Segmentation controls (tune these)
+const SEG_MAX_SIDE = 220;     // downsample max side for segmentation (smaller = faster, blockier)
+const K_CLUSTERS = 36;        // number of color blocks (smaller = flatter)
+const K_ITERS = 8;            // kmeans iterations
+const XY_WEIGHT = 0.35;       // spatial weight (bigger = more coherent "blocks", less color-only mixing)
+const SAMPLE_STEP = 1;        // sample every N pixels in downsample for speed (1 = best)
 
-// Color thresholds
-const SAT_GRAY_EDGE = 0.18;        // grayscale cutoff near edges
-const SAT_GRAY_CENTER = 0.38;      // grayscale cutoff near center (bigger = flatter center)
+// Density variation (optional)
+const USE_DENSITY_SKIP = true;
+const SKIP_THRESHOLD = 0.55;  // higher = less skipping
+const SKIP_MAX = 0.75;        // max skip probability
+
+// Color-to-emoji thresholds (tune these)
+const SAT_GRAY = 0.20;
 const V_BLACK = 0.18;
 const V_WHITE = 0.90;
-
-// Hue bin borders (wide bins = flatter)
 const HUE_BORDERS = [30, 90, 150, 210, 270, 330]; // red|yellow|green|cyan|blue|purple|red
 
-// Emoji assets (replace filenames to match your repo)
+// Emoji assets (replace filenames!)
 let emojis = {};
 
 function preload() {
-  // Replace these filenames with your actual PNG names
+  // Replace with your actual PNG names
   emojis.red    = loadImage("emoji_red.png");
   emojis.yellow = loadImage("emoji_yellow.png");
   emojis.green  = loadImage("emoji_green.png");
@@ -43,16 +52,13 @@ function preload() {
 }
 
 function setup() {
-  // initial canvas; will resize to image size after upload
   createCanvas(600, 800);
   background(255);
 
-  // CSP-safe file input
   fileInputEl = createInput("", "file");
   fileInputEl.attribute("accept", "image/*");
   fileInputEl.elt.onchange = handleFileChange;
 
-  // save button
   saveButtonEl = createButton("点击保存处理后的图片");
   saveButtonEl.mousePressed(saveImage);
 
@@ -92,7 +98,7 @@ function handleFileChange(event) {
 }
 
 // -------------------------
-// Math / color helpers
+// Helpers
 // -------------------------
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -100,7 +106,6 @@ function clamp(v, lo, hi) {
 
 function rgbToHsv(r, g, b) {
   r /= 255; g /= 255; b /= 255;
-
   const maxV = Math.max(r, g, b);
   const minV = Math.min(r, g, b);
   const d = maxV - minV;
@@ -110,7 +115,6 @@ function rgbToHsv(r, g, b) {
     if (maxV === r) h = ((g - b) / d) % 6;
     else if (maxV === g) h = (b - r) / d + 2;
     else h = (r - g) / d + 4;
-
     h *= 60;
     if (h < 0) h += 360;
   }
@@ -120,135 +124,269 @@ function rgbToHsv(r, g, b) {
   return { h, s, v };
 }
 
-// Average RGB from a neighborhood around (cx, cy)
-function sampleAverageRGB(pixels, w, h, cx, cy, radius, step) {
-  const x0 = clamp(cx - radius, 0, w - 1);
-  const x1 = clamp(cx + radius, 0, w - 1);
-  const y0 = clamp(cy - radius, 0, h - 1);
-  const y1 = clamp(cy + radius, 0, h - 1);
+function pickEmojiByMeanRGB(r, g, b) {
+  const { h, s, v } = rgbToHsv(r, g, b);
 
-  let rs = 0, gs = 0, bs = 0, count = 0;
-
-  for (let y = y0; y <= y1; y += step) {
-    for (let x = x0; x <= x1; x += step) {
-      const idx = (x + y * w) * 4;
-      rs += pixels[idx];
-      gs += pixels[idx + 1];
-      bs += pixels[idx + 2];
-      count++;
-    }
-  }
-
-  return {
-    r: rs / count,
-    g: gs / count,
-    b: bs / count
-  };
-}
-
-// Pick emoji with thresholds + inside-out flatten control
-function pickEmojiByColorFlatten(r, g, b, x, y, w, h) {
-  const hsv = rgbToHsv(r, g, b);
-  const hue = hsv.h;
-  const s = hsv.s;
-  const v = hsv.v;
-
-  // inside-out factor: 0 at center, 1 at farthest edge
-  const dx = x - w / 2;
-  const dy = y - h / 2;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  const maxDist = Math.sqrt((w / 2) ** 2 + (h / 2) ** 2);
-  const t = maxDist === 0 ? 1 : clamp(dist / maxDist, 0, 1);
-
-  // center flatter => higher grayscale cutoff at center
-  const satGray = SAT_GRAY_CENTER + (SAT_GRAY_EDGE - SAT_GRAY_CENTER) * t;
-
-  // grayscale handling
-  if (s < satGray) {
+  if (s < SAT_GRAY) {
     if (v < V_BLACK) return emojis.black;
     if (v > V_WHITE) return emojis.white;
     return emojis.gray;
   }
 
-  // hue bins (wide bins => flatter)
-  if (hue < HUE_BORDERS[0] || hue >= HUE_BORDERS[5]) return emojis.red;
-  if (hue < HUE_BORDERS[1]) return emojis.yellow;
-  if (hue < HUE_BORDERS[2]) return emojis.green;
-  if (hue < HUE_BORDERS[3]) return emojis.cyan;
-  if (hue < HUE_BORDERS[4]) return emojis.blue;
+  if (h < HUE_BORDERS[0] || h >= HUE_BORDERS[5]) return emojis.red;
+  if (h < HUE_BORDERS[1]) return emojis.yellow;
+  if (h < HUE_BORDERS[2]) return emojis.green;
+  if (h < HUE_BORDERS[3]) return emojis.cyan;
+  if (h < HUE_BORDERS[4]) return emojis.blue;
   return emojis.purple;
 }
 
+// -------------------------
+// K-means segmentation on downsampled pixels
+// Features are normalized: r,g,b in [0,1], x,y in [0,1] * XY_WEIGHT
+// Returns: { labels, centersRGB, w, h }
+// -------------------------
+function segmentKMeans(pixels, w, h, K, iters, xyWeight, sampleStep) {
+  const n = w * h;
+
+  // Precompute normalized features for each pixel
+  // Store as Float32Array for speed: [r,g,b,x,y] per pixel
+  const feat = new Float32Array(n * 5);
+
+  for (let y = 0; y < h; y++) {
+    const yn = (h <= 1) ? 0 : (y / (h - 1));
+    for (let x = 0; x < w; x++) {
+      const xn = (w <= 1) ? 0 : (x / (w - 1));
+      const i = x + y * w;
+      const idx = i * 4;
+
+      feat[i * 5 + 0] = pixels[idx] / 255;
+      feat[i * 5 + 1] = pixels[idx + 1] / 255;
+      feat[i * 5 + 2] = pixels[idx + 2] / 255;
+      feat[i * 5 + 3] = xn * xyWeight;
+      feat[i * 5 + 4] = yn * xyWeight;
+    }
+  }
+
+  // Labels
+  const labels = new Int16Array(n);
+
+  // Initialize centers by picking random pixels
+  const centers = new Float32Array(K * 5);
+  for (let k = 0; k < K; k++) {
+    const ri = Math.floor(Math.random() * n);
+    for (let d = 0; d < 5; d++) centers[k * 5 + d] = feat[ri * 5 + d];
+  }
+
+  // K-means iterations
+  for (let it = 0; it < iters; it++) {
+    // Accumulators
+    const sum = new Float32Array(K * 5);
+    const count = new Int32Array(K);
+
+    // Assign step (optionally subsample for speed)
+    for (let y = 0; y < h; y += sampleStep) {
+      for (let x = 0; x < w; x += sampleStep) {
+        const i = x + y * w;
+
+        let bestK = 0;
+        let bestD = Infinity;
+
+        const fr = feat[i * 5 + 0];
+        const fg = feat[i * 5 + 1];
+        const fb = feat[i * 5 + 2];
+        const fx = feat[i * 5 + 3];
+        const fy = feat[i * 5 + 4];
+
+        for (let k = 0; k < K; k++) {
+          const cr = centers[k * 5 + 0];
+          const cg = centers[k * 5 + 1];
+          const cb = centers[k * 5 + 2];
+          const cx = centers[k * 5 + 3];
+          const cy = centers[k * 5 + 4];
+
+          const dr = fr - cr;
+          const dg = fg - cg;
+          const db = fb - cb;
+          const dx = fx - cx;
+          const dy = fy - cy;
+
+          const dist2 = dr * dr + dg * dg + db * db + dx * dx + dy * dy;
+          if (dist2 < bestD) {
+            bestD = dist2;
+            bestK = k;
+          }
+        }
+
+        labels[i] = bestK;
+        count[bestK]++;
+
+        sum[bestK * 5 + 0] += fr;
+        sum[bestK * 5 + 1] += fg;
+        sum[bestK * 5 + 2] += fb;
+        sum[bestK * 5 + 3] += fx;
+        sum[bestK * 5 + 4] += fy;
+      }
+    }
+
+    // Update step (reseed empty clusters)
+    for (let k = 0; k < K; k++) {
+      if (count[k] === 0) {
+        const ri = Math.floor(Math.random() * n);
+        for (let d = 0; d < 5; d++) centers[k * 5 + d] = feat[ri * 5 + d];
+      } else {
+        const inv = 1.0 / count[k];
+        for (let d = 0; d < 5; d++) centers[k * 5 + d] = sum[k * 5 + d] * inv;
+      }
+    }
+  }
+
+  // Final full-resolution labeling pass (no subsampling) for clean mapping
+  for (let i = 0; i < n; i++) {
+    let bestK = 0;
+    let bestD = Infinity;
+
+    const fr = feat[i * 5 + 0];
+    const fg = feat[i * 5 + 1];
+    const fb = feat[i * 5 + 2];
+    const fx = feat[i * 5 + 3];
+    const fy = feat[i * 5 + 4];
+
+    for (let k = 0; k < K; k++) {
+      const cr = centers[k * 5 + 0];
+      const cg = centers[k * 5 + 1];
+      const cb = centers[k * 5 + 2];
+      const cx = centers[k * 5 + 3];
+      const cy = centers[k * 5 + 4];
+
+      const dr = fr - cr;
+      const dg = fg - cg;
+      const db = fb - cb;
+      const dx = fx - cx;
+      const dy = fy - cy;
+
+      const dist2 = dr * dr + dg * dg + db * db + dx * dx + dy * dy;
+      if (dist2 < bestD) {
+        bestD = dist2;
+        bestK = k;
+      }
+    }
+
+    labels[i] = bestK;
+  }
+
+  // Compute cluster mean RGB (from original pixels, but via labels)
+  const sumRGB = new Float32Array(K * 3);
+  const cntRGB = new Int32Array(K);
+  for (let i = 0; i < n; i++) {
+    const k = labels[i];
+    const idx = i * 4;
+    sumRGB[k * 3 + 0] += pixels[idx];
+    sumRGB[k * 3 + 1] += pixels[idx + 1];
+    sumRGB[k * 3 + 2] += pixels[idx + 2];
+    cntRGB[k]++;
+  }
+
+  const centersRGB = new Float32Array(K * 3);
+  for (let k = 0; k < K; k++) {
+    if (cntRGB[k] === 0) {
+      // fallback: use kmeans center rgb (normalized) if empty
+      centersRGB[k * 3 + 0] = centers[k * 5 + 0] * 255;
+      centersRGB[k * 3 + 1] = centers[k * 5 + 1] * 255;
+      centersRGB[k * 3 + 2] = centers[k * 5 + 2] * 255;
+    } else {
+      const inv = 1.0 / cntRGB[k];
+      centersRGB[k * 3 + 0] = sumRGB[k * 3 + 0] * inv;
+      centersRGB[k * 3 + 1] = sumRGB[k * 3 + 1] * inv;
+      centersRGB[k * 3 + 2] = sumRGB[k * 3 + 2] * inv;
+    }
+  }
+
+  return { labels, centersRGB, w, h };
+}
+
 // ------------------------------------
-// Core processing: draw on original size
+// Core processing
 // ------------------------------------
 function processImage() {
   if (uploadedImg === null) return;
 
-  const originalWidth = uploadedImg.width;
-  const originalHeight = uploadedImg.height;
+  const W = uploadedImg.width;
+  const H = uploadedImg.height;
 
-  // Resize main canvas to match image + UI space
-  resizeCanvas(originalWidth, originalHeight + 200);
+  // Resize main canvas to match image + UI area
+  resizeCanvas(W, H + 200);
   layoutUI();
 
-  // temp canvas = original pixels (same size)
-  const tempCanvas = createGraphics(originalWidth, originalHeight);
+  // Original pixels canvas
+  const tempCanvas = createGraphics(W, H);
   tempCanvas.pixelDensity(1);
-  tempCanvas.image(uploadedImg, 0, 0, originalWidth, originalHeight);
+  tempCanvas.image(uploadedImg, 0, 0, W, H);
   tempCanvas.loadPixels();
 
-  // final canvas = original image as background + emojis on top
-  const finalCanvas = createGraphics(originalWidth, originalHeight);
+  // Downsample for segmentation
+  const scale = Math.min(1, SEG_MAX_SIDE / Math.max(W, H));
+  const sW = Math.max(1, Math.floor(W * scale));
+  const sH = Math.max(1, Math.floor(H * scale));
+
+  const segCanvas = createGraphics(sW, sH);
+  segCanvas.pixelDensity(1);
+  segCanvas.image(tempCanvas, 0, 0, sW, sH);
+  segCanvas.loadPixels();
+
+  // Run K-means segmentation on downsampled pixels
+  const seg = segmentKMeans(
+    segCanvas.pixels,
+    sW,
+    sH,
+    K_CLUSTERS,
+    K_ITERS,
+    XY_WEIGHT,
+    SAMPLE_STEP
+  );
+
+  // Precompute emoji per cluster + mean brightness per cluster
+  const clusterEmoji = new Array(K_CLUSTERS);
+  const clusterBrightness = new Float32Array(K_CLUSTERS);
+
+  for (let k = 0; k < K_CLUSTERS; k++) {
+    const r = seg.centersRGB[k * 3 + 0];
+    const g = seg.centersRGB[k * 3 + 1];
+    const b = seg.centersRGB[k * 3 + 2];
+    clusterEmoji[k] = pickEmojiByMeanRGB(r, g, b);
+    clusterBrightness[k] = (r + g + b) / 3; // 0..255
+  }
+
+  // Final canvas (same size as original)
+  const finalCanvas = createGraphics(W, H);
   finalCanvas.pixelDensity(1);
+
+  // Draw original image as background
   finalCanvas.image(tempCanvas, 0, 0);
 
-  // density variation (optional)
-  const skipThreshold = 0.5;
+  // Draw emoji mosaic using cluster labels (color blocks)
+  for (let y = 0; y < H; y += grid + 2) {
+    for (let x = 0; x < W; x += grid + 2) {
 
-  for (let y = 0; y < tempCanvas.height; y += grid + 2) {
-    for (let x = 0; x < tempCanvas.width; x += grid + 2) {
+      // Map (x,y) in original image to (sx,sy) in segmentation map
+      const sx = clamp(Math.floor((x / (W - 1 || 1)) * (sW - 1)), 0, sW - 1);
+      const sy = clamp(Math.floor((y / (H - 1 || 1)) * (sH - 1)), 0, sH - 1);
+      const label = seg.labels[sx + sy * sW];
 
-      // inside-out smoothing radius: bigger near center => flatter center
-      const dx = x - tempCanvas.width / 2;
-      const dy = y - tempCanvas.height / 2;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const maxDist = Math.sqrt((tempCanvas.width / 2) ** 2 + (tempCanvas.height / 2) ** 2);
-      const t = maxDist === 0 ? 1 : clamp(dist / maxDist, 0, 1);
+      const bVal = clusterBrightness[label]; // 0..255
 
-      const radius = Math.floor(BASE_RADIUS + (1 - t) * EXTRA_RADIUS_CENTER);
-
-      // Sample average color around (x,y)
-      const c = sampleAverageRGB(
-        tempCanvas.pixels,
-        tempCanvas.width,
-        tempCanvas.height,
-        x,
-        y,
-        radius,
-        SAMPLE_STEP
-      );
-
-      // brightness drives density + size (using averaged color)
-      const brightnessVal = (c.r + c.g + c.b) / 3;
-      const brightnessMap = map(brightnessVal, 0, 255, 0.0, 1.0);
-
-      if (brightnessMap > skipThreshold) {
-        const skipProbability = map(brightnessMap, skipThreshold, 1.0, 0.0, 0.8);
-        if (random(1) < skipProbability) continue;
+      if (USE_DENSITY_SKIP) {
+        const brightnessMap = map(bVal, 0, 255, 0.0, 1.0);
+        if (brightnessMap > SKIP_THRESHOLD) {
+          const skipProb = map(brightnessMap, SKIP_THRESHOLD, 1.0, 0.0, SKIP_MAX);
+          if (random(1) < skipProb) continue;
+        }
       }
 
-      const reversedPix = 255 - brightnessVal;
-      const currentDiameter = map(reversedPix, 0, 255, minDiameter, maxDiameter);
+      const reversedPix = 255 - bVal;
+      const d = map(reversedPix, 0, 255, minDiameter, maxDiameter);
 
-      // NEW: choose emoji by thresholded color (flattened)
-      const emoji = pickEmojiByColorFlatten(
-        c.r, c.g, c.b,
-        x, y,
-        tempCanvas.width, tempCanvas.height
-      );
-
-      finalCanvas.image(emoji, x, y, currentDiameter, currentDiameter);
+      finalCanvas.image(clusterEmoji[label], x, y, d, d);
     }
   }
 
@@ -262,8 +400,8 @@ function processImage() {
 function draw() {
   background(255);
   fill(0);
-  textSize(20);
-  text("上传图片后，处理结果将在下方显示 (原尺寸)", width / 2, 120);
+  textSize(18);
+  text("上传图片后，处理结果将在下方显示 (原尺寸 + 颜色块分割)", width / 2, 120);
 
   if (processedCanvas) {
     image(processedCanvas, 0, 200);
