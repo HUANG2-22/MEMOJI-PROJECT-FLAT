@@ -227,7 +227,7 @@ function processImage() {
 function draw() {
   background(255);
   fill(0);
-  textSize(18);
+  textSize(9);
   text(statusMsg, width / 2, 120);
 
   if (processedCanvas) {
