@@ -12,7 +12,7 @@ const UI_HEIGHT = 200;
 
 // Mosaic resolution: smaller => bigger single emoji
 // e.g. 22 -> ~41px per emoji, 30 -> 30px per emoji
-const MOSAIC_DIM = 22;
+const MOSAIC_DIM = 66;
 
 // HSV thresholds (tune to get a flatter / more stable classification)
 const S_GRAY = 0.18;   // below this saturation => gray/black/white
